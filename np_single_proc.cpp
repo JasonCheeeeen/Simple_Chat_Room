@@ -79,7 +79,6 @@ fd_set afds;
 fd_set rfds; // used to select
 vector<int> client_id_table(MAX_CLIENT_USER, 0); // store current total client id
 unordered_map<int, client_information> client_info_table; // store current total client information
-//vector<client_information> client_info_table; // store current total client information
 
 /* current client information */
 struct client_information* current_client;
@@ -110,7 +109,7 @@ int getClientInfoInMapWithfd(int);
 void welcomemsg(int);
 /* delete logout client information */
 void dellogoutclient(int);
-/* broadcast(*current_client_information_iterator, type, message, broadcast_id) */
+/* broadcast(structure of current client information, type, message, broadcast_id) */
 void broadcast(struct client_information, string, string, int);
 
 ////////////////////     user pipe function     ////////////////////
@@ -121,6 +120,10 @@ void broadcast(struct client_information, string, string, int);
 
 void _setenv(string,string);
 void _printenv(string);
+void _who(void);
+void _tell(vector<string>);
+void _yell(vector<string>);
+void _name(vector<string>);
 
 ////////////////////     main function     ////////////////////
 
@@ -141,11 +144,9 @@ int main(int argc, char* argv[]){
     nfds = getdtablesize();
     FD_ZERO(&afds);
     FD_SET(msock, &afds);
-    int current_max_fd = msock;
     /* client socket address */
     struct sockaddr_in _cin;
     while(1){
-
         memcpy(&rfds, &afds, sizeof(rfds));
 
         /* server listen whether client need to connect */
@@ -172,13 +173,14 @@ int main(int argc, char* argv[]){
                 cinfo.client_name = "(no name)";
                 /* store client's default evironment */
                 cinfo.client_env["PATH"] = "bin:.";
+                /* get useful client id */
                 int _client_id = getClientID();
                 cinfo.client_id = _client_id;
                 if(_client_id == -1){
                     cerr<<"Client's connection over 30 !\n";
                     continue;
                 }
-                /* store client information to client table */
+                /* store client information to client table by using id */
                 client_info_table[_client_id] = cinfo;
 
                 FD_SET(ssock, &afds);
@@ -188,7 +190,7 @@ int main(int argc, char* argv[]){
                 
                 /* write % to client to start service */
                 string _bash = "% ";
-                if(send(cinfo.client_fd, _bash.c_str(), _bash.size(), 0) == -1){
+                if(send(cinfo.client_fd, _bash.c_str(), _bash.size(), 0) < 0){
                     cerr<<"write '%' to client FAIL !\n";
                 }
             }
@@ -215,6 +217,11 @@ int main(int argc, char* argv[]){
                     dellogoutclient(client_info_table[_map_id].client_id);
                     /* close erased client's fd !!! */
                     close(fd);
+                    close(STDOUT_FILENO);
+                    close(STDERR_FILENO);
+                    dup2(STDIN_FILENO, STDOUT_FILENO);
+                    dup2(STDIN_FILENO, STDERR_FILENO);
+
                     FD_CLR(fd, &afds);
                 }
                 /* client's message exist */
@@ -229,8 +236,14 @@ int main(int argc, char* argv[]){
                         client_id_table[client_info_table[_map_id].client_id-1] = 0;
                         /* delete client who logout ! */
                         dellogoutclient(client_info_table[_map_id].client_id);
-                        /* close erased client's fd !!! */
+
+                        /* need to dup stdout & stderr back to stdin and close erased client's fd !!! */
                         close(fd);
+                        close(STDOUT_FILENO);
+                        close(STDERR_FILENO);
+                        dup2(STDIN_FILENO, STDOUT_FILENO);
+                        dup2(STDIN_FILENO, STDERR_FILENO);
+                        
                         FD_CLR(fd, &afds);
                     }
                 }
@@ -283,9 +296,10 @@ int setServerTCP(int port){
 void dellogoutclient(int _id){
     /* delete user pipe who want to send message to target */
     for(auto it:client_info_table){
-        vector<struct user_pipe> tmp_userpipe = it.second._user_pipe;
-        vector<struct user_pipe>::iterator iter = tmp_userpipe.begin();
-        while(iter != tmp_userpipe.end()){
+        // vector<struct user_pipe> tmp_userpipe = it.second._user_pipe;
+        // vector<struct user_pipe>::iterator iter = tmp_userpipe.begin();
+        vector<struct user_pipe>::iterator iter = it.second._user_pipe.begin();
+        while(iter != it.second._user_pipe.end()){
             /* someone who want send message to target client */
             if((*iter).targetID == _id){
                 close((*iter).fdin);
@@ -309,6 +323,12 @@ void broadcast(struct client_information cInfo, string func, string msg, int tar
     }
     else if(func == "log-out"){
         broadcast_msg += ("*** User '" + cInfo.client_name + "' left. ***\n");
+    }
+    else if(func == "yell"){
+        broadcast_msg += msg;
+    }
+    else if(func == "name"){
+        broadcast_msg += msg;
     }
     //cout<<msg<<endl;
     /* write message to all clients without server */
@@ -358,7 +378,7 @@ void welcomemsg(int _ssock){
     return;
 }
 
-//////////     shell function code     //////////
+////////////////////     shell function code     ////////////////////
 
 /* shell's main function */
 int shellMain(int _id, string _input_cmd){
@@ -371,9 +391,10 @@ int shellMain(int _id, string _input_cmd){
         Otherwise, you will not find where is wrong !!!
     */
     current_client = &client_info_table[_id];
+
     /* dup stdout & stderr to client's fd */
-    // dup2(current_client->client_fd, STDOUT_FILENO);
-    // dup2(current_client->client_fd, STDERR_FILENO);
+    dup2(current_client->client_fd, STDOUT_FILENO);
+    dup2(current_client->client_fd, STDERR_FILENO);
 
     /* transform environment to current client's environment */
     clearenv();
@@ -387,6 +408,13 @@ int shellMain(int _id, string _input_cmd){
     }
     vector<string> cmds = split_inputCmds(_input_cmd);
     res_exec = part_cmds(cmds);
+
+    /*
+        bug: if no use fflush, the output data will
+        reamin in the output buffer and every time it
+        will output all data.
+    */
+    fflush(stdout);
     string _bash = "% ";
     if(send(current_client->client_fd, _bash.c_str(), _bash.size(), 0) == -1){
         cerr<<"write '%' to client FAIL !\n";
@@ -411,6 +439,12 @@ int part_cmds(vector<string> cmds){
     while(_cur < _size){
         if(cmds_info.cmds.size() == 0){
             cmds_info.cmds.push_back(cmds[_cur++]);
+            /* check tell and yell message because if the message is ! or |, it will be wrong */
+            if(cmds_info.cmds[0] == "tell" || cmds_info.cmds[0] == "yell" || cmds_info.cmds[0] == "name"){
+                while(_cur < _size){
+                    cmds_info.cmds.push_back(cmds[_cur++]);
+                }
+            }
             /* check the last cmds, need to make pipe */
             if(_cur >= _size){
                 cmds_info.endofcmds = true;
@@ -467,11 +501,9 @@ int part_cmds(vector<string> cmds){
 }
 
 int make_pipe(cmds_allinfo &ccmds_info){
-    for(auto it:current_client->_pipe){
-        cout<<it.first<<" "<<it.second[0]<<" "<<it.second[1]<<endl;
-    }
-    /* record this time exec result */
+    /* record this time exec's result */
     int res_exec;
+
     ccmds_info.fdin = make_pipe_in(ccmds_info.fdin);
     res_exec = exec_cmds(ccmds_info);
     /* decrease , increase and close pipe number after exec each time (different between ordinary and number pipe) */
@@ -507,14 +539,30 @@ int exec_cmds(cmds_allinfo ccmds_info){
             _setenv(ccmds_info.cmds[1], ccmds_info.cmds[2]);
             return 0;
         }
-        else if(ccmds_info.cmds[0] == "prientenv"){
+        else if(ccmds_info.cmds[0] == "printenv"){
             _printenv(ccmds_info.cmds[1]);
             return 0;
         }
     }
-    // for(auto it:ccmds_info.cmds){
-    //     cout<<it<<endl;
-    // }
+    /* check built-in commands - who, tell, yell and name */
+    if(ccmds_info.cmds[0] == "who" || ccmds_info.cmds[0] == "tell" || ccmds_info.cmds[0] == "yell" || ccmds_info.cmds[0] == "name" ){
+        if(ccmds_info.cmds[0] == "who"){
+            _who();
+            return 0;
+        }
+        else if(ccmds_info.cmds[0] == "tell"){
+            _tell(ccmds_info.cmds);
+            return 0;
+        }
+        else if(ccmds_info.cmds[0] == "yell"){
+            _yell(ccmds_info.cmds);
+            return 0;
+        }
+        else{
+            _name(ccmds_info.cmds);
+            return 0;
+        }
+    }
 
     char* args[ccmds_info.cmds.size()+1];
     str2char(ccmds_info.cmds,args);
@@ -544,9 +592,8 @@ int exec_cmds(cmds_allinfo ccmds_info){
             same as close the ccmds_info.fderr. Hence, it needs to dup2 all fd and then close.
             [ bug fixed at commit 4e1b42d627f181565196c8e492eea6faf48ab875 ]
         */
-        dup2(current_client->client_fd, STDOUT_FILENO);
-        dup2(current_client->client_fd, STDERR_FILENO);
 
+        /* Need to dup stdin to another pipe if ccmds_info.fdin has changed, otherwise, remain the same. */
         if(ccmds_info.fdin != current_client->client_fd){
             dup2(ccmds_info.fdin,STDIN_FILENO);
         }
@@ -629,6 +676,94 @@ void killzombieprocess(int sig){
     };
 }
 
+////////////////////     built-in function code     ////////////////////
+
+void _who(){
+    string who_msg = "<ID>  <nickname>  <IP:Port>   <indicate me>\n";
+    cout<<who_msg;
+    for(int i=0;i<MAX_CLIENT_USER;i++){
+        if(client_id_table[i] == 1){
+            client_information who_client = client_info_table[i+1]; // id is id-table + 1
+            who_msg = (to_string(i+1) + "   " + who_client.client_name + "  " + who_client.client_ip + ":" + to_string(who_client.client_port));
+            if(current_client->client_id == (i+1)){
+                who_msg += "    <-me\n";
+            }
+            else{
+                who_msg += "\n";
+            }
+            cout<<who_msg;
+        }
+    }
+    return;
+}
+
+void _tell(vector<string> _cmds){
+    int recv_id = stoi(_cmds[1]);
+    string tell_msg = "";
+    for(int i=2; i<_cmds.size(); i++){
+        tell_msg += _cmds[i];
+        if(i != _cmds.size()-1){
+            tell_msg += " ";
+        }
+        else{
+            tell_msg += "\n";
+        }
+    }
+    /* receiver exist */
+    if(client_id_table[recv_id-1] == 1){
+        int recv_fd = client_info_table[recv_id].client_fd;
+        string _tell_msg = ("*** " + current_client->client_name + " told you ***: " + tell_msg); 
+        if(send(recv_fd, _tell_msg.c_str(), _tell_msg.size(), 0) < 0){
+            cerr<<"send _tell message FAIL !\n";
+        }
+    }
+    else{
+        string _tell_msg = ("*** Error: user #" + _cmds[1] + " does not exist yet. ***\n");
+        cout<<_tell_msg;
+    }
+    return;
+}
+
+void _yell(vector<string> _cmds){
+    string yell_msg = "";
+    for(int i=1; i<_cmds.size(); i++){
+        yell_msg += _cmds[i];
+        if(i != _cmds.size()-1){
+            yell_msg += " ";
+        }
+        else{
+            yell_msg += "\n";
+        }
+    }
+    string _yell_msg = ("*** " + current_client->client_name + " yelled ***: " + yell_msg);
+    broadcast((*current_client), "yell", _yell_msg, -1);
+    return;
+}
+
+
+void _name(vector<string> _cmds){
+    string name = "";
+    for(int i=1; i<_cmds.size(); i++){
+        name += _cmds[i];
+        if(i != _cmds.size()-1){
+            name += " ";
+        }
+    }
+    string name_msg;
+    for(auto it:client_info_table){
+        if(it.second.client_name == name){
+            name_msg = ("*** User '" + name + "' already exists. ***\n");
+            cout<<name_msg;
+            return;
+        }
+    }
+    /* record the current client's name */
+    current_client->client_name = name;
+    name_msg = ("*** User from " + current_client->client_ip + ":" + to_string(current_client->client_port) + " is named '" + name + "'. ***\n");
+    broadcast((*current_client), "name", name_msg, -1);
+    return;
+}
+
 void _setenv(string name, string value){
     /* setenv(char*, char*, int) */
     setenv(name.c_str(), value.c_str(), 1);
@@ -639,19 +774,6 @@ void _setenv(string name, string value){
     //     cout<<it<<" ";
     // }
     // cout<<endl;
-}
-
-vector<string> split_inputPath(string sin){
-    vector<string> res = {};
-    size_t start = 0;
-    size_t end = 0;
-    start = sin.find_first_not_of(':', end);
-    while(start != string::npos){
-        end = sin.find_first_of(':', start);
-        res.push_back(sin.substr(start, end-start));
-        start = sin.find_first_not_of(':', end);
-    }
-    return res;
 }
 
 void _printenv(string name){
@@ -739,6 +861,19 @@ void str2char(vector<string> cmds, char** args){
         args[i] = new char(cmds[i].size()+1);
         strcpy(args[i],cmds[i].c_str());
     }
+}
+
+vector<string> split_inputPath(string sin){
+    vector<string> res = {};
+    size_t start = 0;
+    size_t end = 0;
+    start = sin.find_first_not_of(':', end);
+    while(start != string::npos){
+        end = sin.find_first_of(':', start);
+        res.push_back(sin.substr(start, end-start));
+        start = sin.find_first_not_of(':', end);
+    }
+    return res;
 }
 
 vector<string> split_inputCmds(string sin){
