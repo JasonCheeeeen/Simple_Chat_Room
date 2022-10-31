@@ -89,6 +89,16 @@ unordered_map<int, client_information> client_info_table; // store current total
 struct client_information* current_client;
 /* current client's command */
 string client_command;
+/* record user pipe send message */
+int send_user_pipe_id;
+string client_user_pipe_send_message_success;
+string client_user_pipe_send_message_fail;
+/* record user pipe receiver message */
+int recv_user_pipe_id;
+string client_user_pipe_recv_message_success;
+string client_user_pipe_recv_message_fail;
+/* erase user pipe which has been read */
+vector<int> waited_close_user_pipe;
 
 ////////////////////     shell function     ////////////////////
 
@@ -122,6 +132,7 @@ void broadcast(struct client_information, string, string, int);
 ////////////////////     user pipe function     ////////////////////
 
 int make_user_pipe_out(int); // get user pipe send's file descriptor
+int make_user_pipe_in(int); // get user pipe receiver's file descriptor
 
 
 ////////////////////     built-in function     ////////////////////
@@ -338,6 +349,9 @@ void broadcast(struct client_information cInfo, string func, string msg, int tar
     else if(func == "send_user_pipe"){
         broadcast_msg = ("*** " + cInfo.client_name + " (#" + to_string(cInfo.client_id) + ") just piped '" + msg + "' to " + client_info_table[tarId].client_name + " (#" + to_string(tarId) + ") ***\n");
     }
+    else if(func == "recv_user_pipe"){
+        broadcast_msg = ("*** " + cInfo.client_name + " (#" + to_string(cInfo.client_id) + ") just received from " + client_info_table[tarId].client_name + " (#" + to_string(tarId) + ") by '" + msg + "' ***\n");
+    }
     //cout<<msg<<endl;
     /* write message to all clients without server */
     for(int fd = 0; fd < nfds; fd++){
@@ -390,6 +404,17 @@ void welcomemsg(int _ssock){
 
 /* shell's main function */
 int shellMain(int _id, string _input_cmd){
+    
+    /* initialize some global variables */
+    client_command = "";
+    send_user_pipe_id = -1;
+    recv_user_pipe_id = -1;
+    client_user_pipe_send_message_success = "";
+    client_user_pipe_recv_message_success = "";
+    client_user_pipe_send_message_fail = "";
+    client_user_pipe_recv_message_fail = "";
+    waited_close_user_pipe.clear();
+
     /* record this time exec result */
     int res_exec;
 
@@ -469,7 +494,14 @@ int part_cmds(vector<string> cmds){
             pipe_num = get_pipe_num(cmds[_cur]);
             // cout<<pipe_num<<endl;
             /* construct stdout goal pipe (write) */
+            // cout<<pipe_num<<endl;
+            // for(auto it:current_client->_pipe){
+            //     cout<<it.first<<" "<<it.second[0]<<" "<<it.second[1]<<endl;
+            // }
             cmds_info.fdout = make_pipe_out(pipe_num);
+            // for(auto it:current_client->_pipe){
+            //     cout<<it.first<<" "<<it.second[0]<<" "<<it.second[1]<<endl;
+            // }
             /* connect cmds_info.fderr to cmds_info.fdout */
             cmds_info.fderr = cmds[_cur][0] == '!' ? cmds_info.fdout : cmds_info.fderr;
             cmds_info.isordpipe = pipe_num == -1 ? true : false;
@@ -493,8 +525,9 @@ int part_cmds(vector<string> cmds){
             cmds_info.isordpipe = false;
             if(_cur >= _size){
                 cmds_info.endofcmds = true;
+                res_exec = make_pipe(cmds_info);
             }
-            res_exec = make_pipe(cmds_info);
+            // res_exec = make_pipe(cmds_info);
         }
         /* user pipe for clint message to another client */
         else if(cmds[_cur][0] == '>' && cmds[_cur].size() > 1){
@@ -505,33 +538,72 @@ int part_cmds(vector<string> cmds){
             string senduserpipemsg;
             if(client_id_table[user_pipe_recv_id-1] == 0){
                 senduserpipemsg = ("*** Error: user #" + to_string(user_pipe_recv_id) + " does not exist yet. ***\n");
-                cout<<senduserpipemsg;
-                return 0;
+                client_user_pipe_send_message_fail = senduserpipemsg;
             }
             /* check pipe is already exist or not */
-            if(current_client->_user_pipe.find(user_pipe_recv_id) != current_client->_user_pipe.end()){
+            else if(current_client->_user_pipe.find(user_pipe_recv_id) != current_client->_user_pipe.end()){
                 senduserpipemsg = ("*** Error: the pipe #" + to_string(current_client->client_id) + "->#" + to_string(user_pipe_recv_id) + " already exist. ***\n");
-                cout<<senduserpipemsg;
-                return 0;
+                client_user_pipe_send_message_fail = senduserpipemsg;
             }
-            /* create user pipe */
-            cmds_info.fdout = make_user_pipe_out(user_pipe_recv_id);
-            cmds_info.dopipe = false;
+            else{
+                /* create user pipe */
+                cmds_info.fdout = make_user_pipe_out(user_pipe_recv_id);
+                /* broadcast cmds message to receiver client */
+                string _client_command = "";
+                for(int i=0; i<client_command.size();i++){
+                    if(client_command[i] == '\n' || client_command[i] == '\r'){
+                        continue;
+                    }
+                    _client_command += client_command[i];
+                }
+                client_user_pipe_send_message_success = _client_command;
+                recv_user_pipe_id = user_pipe_recv_id;
+            }
+
+            cmds_info.dopipe = true;
             cmds_info.isordpipe = false;
             if(_cur >= _size){
                 cmds_info.endofcmds = true;
+                res_exec = make_pipe(cmds_info);
             }
-            /* broadcast cmds message to receiver client */
-            string _client_command = "";
-            for(int i=0; i<client_command.size();i++){
-                if(client_command[i] == '\n' || client_command[i] == '\r'){
-                    continue;
+        }
+        else if(cmds[_cur][0] == '<' && cmds[_cur].size() > 1){
+            int user_pipe_send_id;
+            user_pipe_send_id = get_pipe_num(cmds[_cur]);
+            _cur++;
+            /* check send client exist or not */
+            string recvuserpipemsg;
+            if(client_id_table[user_pipe_send_id-1] == 0){
+                recvuserpipemsg = ("*** Error: user #" + to_string(user_pipe_send_id) + " does not exist yet. ***\n");
+                client_user_pipe_recv_message_fail = recvuserpipemsg;
+            }
+            /* check pipe is already exist or not */
+            else if(client_info_table[user_pipe_send_id]._user_pipe.find(current_client->client_id) == client_info_table[user_pipe_send_id]._user_pipe.end()){
+                recvuserpipemsg = ("*** Error: the pipe #" + to_string(user_pipe_send_id) + "->#" + to_string(current_client->client_id) + " does not exist yet. ***\n");
+                client_user_pipe_recv_message_fail = recvuserpipemsg;
+            }
+            else{
+                /* connect to user pipe */
+                cmds_info.fdin = make_user_pipe_in(user_pipe_send_id);
+                /* broadcast cmds message to receiver client */
+                string _client_command = "";
+                for(int i=0; i<client_command.size();i++){
+                    if(client_command[i] == '\n' || client_command[i] == '\r'){
+                        continue;
+                    }
+                    _client_command += client_command[i];
                 }
-                _client_command += client_command[i];
+                client_user_pipe_recv_message_success = _client_command;
+                send_user_pipe_id = user_pipe_send_id;
+                /* record user pipe which has been used */
+                waited_close_user_pipe.push_back(user_pipe_send_id);
             }
-            broadcast((*current_client), "send_user_pipe", _client_command, user_pipe_recv_id);
-
-            res_exec = make_pipe(cmds_info);
+            cmds_info.dopipe = true;
+            cmds_info.isordpipe = false;
+            if(_cur >= _size){
+                cmds_info.endofcmds = true;
+                res_exec = make_pipe(cmds_info);
+            }
         }
         else{
             cmds_info.cmds.push_back(cmds[_cur++]);
@@ -551,10 +623,62 @@ int make_pipe(cmds_allinfo &ccmds_info){
     /* record this time exec's result */
     int res_exec;
 
+    /* record user pipe error */
+    bool user_pipe_error = false;
+    /* process the user pipe's message */
+    if(client_user_pipe_recv_message_fail.size() != 0){
+        cout<<client_user_pipe_recv_message_fail;
+        client_user_pipe_recv_message_fail = "";
+        user_pipe_error = true;
+    }
+    if(client_user_pipe_send_message_fail.size() != 0){
+        cout<<client_user_pipe_send_message_fail;
+        client_user_pipe_send_message_fail = "";
+        user_pipe_error = true;
+    }
+    if(user_pipe_error == true){
+        close_decrease_pipe(ccmds_info.isordpipe);
+        user_pipe_error = false;
+        return 0;
+    }
+    if(client_user_pipe_recv_message_success.size() != 0){
+        broadcast((*current_client), "recv_user_pipe", client_user_pipe_recv_message_success, send_user_pipe_id);
+        send_user_pipe_id = -1;
+        client_user_pipe_recv_message_success = "";
+    }
+    if(client_user_pipe_send_message_success.size() != 0){
+        broadcast((*current_client), "send_user_pipe", client_user_pipe_send_message_success, recv_user_pipe_id);
+        recv_user_pipe_id = -1;
+        client_user_pipe_send_message_success = "";
+    }
+
     ccmds_info.fdin = make_pipe_in(ccmds_info.fdin);
     res_exec = exec_cmds(ccmds_info);
     /* decrease , increase and close pipe number after exec each time (different between ordinary and number pipe) */
     close_decrease_pipe(ccmds_info.isordpipe);
+
+    if(ccmds_info.fdin != current_client->client_fd){
+        close(ccmds_info.fdin);
+    }
+    /* erase user pipe which has been used */
+    for(int i=0; i<waited_close_user_pipe.size(); i++){
+        vector<int> record_erase_id = {};
+        for(auto it:client_info_table[waited_close_user_pipe[i]]._user_pipe){
+            if(it.second.usedornot == true){
+                record_erase_id.push_back(it.first);
+            }
+        }
+        for(int j=0; j<record_erase_id.size(); j++){
+            //cout<<client_info_table[waited_close_user_pipe[i]]._user_pipe[record_erase_id[j]].fdin<<" ";
+            //cout<<client_info_table[waited_close_user_pipe[i]]._user_pipe[record_erase_id[j]].fdout<<endl;
+            close(client_info_table[waited_close_user_pipe[i]]._user_pipe[record_erase_id[j]].fdin);
+            /*  ????????????????????????????????????? */
+            //close(client_info_table[waited_close_user_pipe[i]]._user_pipe[record_erase_id[j]].fdout);
+            client_info_table[waited_close_user_pipe[i]]._user_pipe.erase(record_erase_id[j]);
+        }
+    }
+    waited_close_user_pipe.clear();
+
     // if(ccmds_info.isordpipe == false){
     //     close_decrease_pipe();
     // }
@@ -739,6 +863,16 @@ int make_user_pipe_out(int _id){
     return fd[1];
 }
 
+int make_user_pipe_in(int _id){
+    if(client_info_table[_id]._user_pipe.find(current_client->client_id) != client_info_table[_id]._user_pipe.end()){
+        close(client_info_table[_id]._user_pipe[current_client->client_id].fdout);
+        client_info_table[_id]._user_pipe[current_client->client_id].usedornot = true;
+        return client_info_table[_id]._user_pipe[current_client->client_id].fdin;
+    }
+    return -1;
+}
+
+
 ////////////////////     built-in function code     ////////////////////
 
 void _who(){
@@ -864,8 +998,10 @@ void _printenv(string name){
 void close_decrease_pipe(bool ordpipe){
     if(current_client->_pipe.find(0) != current_client->_pipe.end()){
         vector<int> fd = current_client->_pipe[0];
-        close(fd[0]);
-        close(fd[1]);
+        close(current_client->_pipe[0][0]);
+        close(current_client->_pipe[0][1]);
+        // close(fd[0]);
+        // close(fd[1]);
         current_client->_pipe.erase(0);
     }
     if(!ordpipe){
