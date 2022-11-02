@@ -58,11 +58,13 @@ struct client_information{
     int client_id;
     int client_port;
     int client_fd;
+    /* struct of shell's running pipe */
     map<int,vector<int>> _pipe;
-    //vector<struct user_pipe> _user_pipe;
     /* struct of user pipe, key -> recviver client's id */
     unordered_map<int, struct user_pipe> _user_pipe;
+    /* struct of storing each client's environments */
     unordered_map<string,string> client_env;
+    vector<string> client_path;
     client_information(){
         client_name = "";
         client_ip = "";
@@ -72,6 +74,7 @@ struct client_information{
         _pipe.clear();
         _user_pipe.clear();
         client_env.clear();
+        client_path.clear();
     }
 };
 
@@ -89,6 +92,8 @@ unordered_map<int, client_information> client_info_table; // store current total
 struct client_information* current_client;
 /* current client's command */
 string client_command;
+/* record user pipe error */
+bool user_pipe_error;
 /* record user pipe send message */
 int send_user_pipe_id;
 string client_user_pipe_send_message_success;
@@ -199,6 +204,13 @@ int main(int argc, char* argv[]){
                 /* store client information to client table by using id */
                 client_info_table[_client_id] = cinfo;
 
+                /* server output new client's id and fd */
+                cout<<"###################################################\n";
+                cout<<"\n";
+                cout<<"           New client !! id = "<<_client_id<<" & fd = "<<ssock<<"\n";
+                cout<<"\n";
+                cout<<"###################################################\n\n";
+
                 FD_SET(ssock, &afds);
                 welcomemsg(ssock);
                 
@@ -241,6 +253,13 @@ int main(int argc, char* argv[]){
                     dup2(STDIN_FILENO, STDOUT_FILENO);
                     dup2(STDIN_FILENO, STDERR_FILENO);
 
+                    /* server output logout client's id and fd */
+                    cout<<"###################################################\n";
+                    cout<<"\n";
+                    cout<<"         client logout !! id = "<<_map_id<<" & fd = "<<fd<<"\n";
+                    cout<<"\n";
+                    cout<<"###################################################\n\n";
+
                     /* clear client in afds */
                     FD_CLR(fd, &afds);
                 }
@@ -263,6 +282,13 @@ int main(int argc, char* argv[]){
                         close(STDERR_FILENO);
                         dup2(STDIN_FILENO, STDOUT_FILENO);
                         dup2(STDIN_FILENO, STDERR_FILENO);
+
+                        /* server output logout client's id and fd */
+                        cout<<"###################################################\n";
+                        cout<<"\n";
+                        cout<<"         client logout !! id = "<<_map_id<<" & fd = "<<fd<<"\n";
+                        cout<<"\n";
+                        cout<<"###################################################\n\n";
                         
                         /* clear client in afds */
                         FD_CLR(fd, &afds);
@@ -304,6 +330,13 @@ int setServerTCP(int port){
         cerr<<"Bind Server Socket fault !\n";
         return 0;
     }
+
+    /* server output welcome */
+    cout<<"\n###################################################\n";
+    cout<<"\n";
+    cout<<"        server ready, waiting for client...\n";
+    cout<<"\n";
+    cout<<"###################################################\n\n";
 
     /* listen */
     listen(msock, 0);
@@ -358,6 +391,10 @@ void broadcast(struct client_information cInfo, string func, string msg, int tar
         if(fd == msock){
             continue;
         }
+        /* client who want to logout will not receive the broadcast message */
+        if(func == "log-out" && cInfo.client_fd == fd){
+            continue;
+        }
         if(FD_ISSET(fd, &afds)){
             if(send(fd, broadcast_msg.c_str(), broadcast_msg.size(), 0) < 0){
                 cerr<<"Broadcast to "<<fd<<" fault !\n";
@@ -406,6 +443,7 @@ void welcomemsg(int _ssock){
 int shellMain(int _id, string _input_cmd){
     
     /* initialize some global variables */
+    user_pipe_error = false;
     client_command = "";
     send_user_pipe_id = -1;
     recv_user_pipe_id = -1;
@@ -422,6 +460,7 @@ int shellMain(int _id, string _input_cmd){
         bug: This part is the most important, 
         PLEASE USE "&" to reference the global client information table.
         Otherwise, you will not find where is wrong !!!
+        [ bug fixxed ]
     */
     current_client = &client_info_table[_id];
 
@@ -439,6 +478,7 @@ int shellMain(int _id, string _input_cmd){
     if(_input_cmd.size() == 0){
         return 0; // not logout
     }
+
     /* record client's command used to >? or <? */
     client_command = _input_cmd;
     vector<string> cmds = split_inputCmds(_input_cmd);
@@ -450,6 +490,13 @@ int shellMain(int _id, string _input_cmd){
         will output all data, so it need to be cleaned.
     */
     fflush(stdout);
+    /* client input "exit" who want to logout */
+    if(res_exec == -1){
+        return -1;
+    }
+    // if(cmds[cmds.size()-1][0] == '|' && cmds[cmds.size()-1].size() != 1){
+    //     sleep(1);
+    // }
     string _bash = "% ";
     if(send(current_client->client_fd, _bash.c_str(), _bash.size(), 0) == -1){
         cerr<<"write '%' to client fault !\n";
@@ -623,8 +670,6 @@ int make_pipe(cmds_allinfo &ccmds_info){
     /* record this time exec's result */
     int res_exec;
 
-    /* record user pipe error */
-    bool user_pipe_error = false;
     /* process the user pipe's message */
     if(client_user_pipe_recv_message_fail.size() != 0){
         cout<<client_user_pipe_recv_message_fail;
@@ -636,10 +681,14 @@ int make_pipe(cmds_allinfo &ccmds_info){
         client_user_pipe_send_message_fail = "";
         user_pipe_error = true;
     }
+    /* prevent error user pipe to run execvp */
     if(user_pipe_error == true){
+        if(check_command(ccmds_info.cmds[0]) == false){
+            cerr<<"Unknown command: ["<<ccmds_info.cmds[0]<<"].\n";
+        }
         close_decrease_pipe(ccmds_info.isordpipe);
         user_pipe_error = false;
-        return 0;
+        return res_exec;
     }
     if(client_user_pipe_recv_message_success.size() != 0){
         broadcast((*current_client), "recv_user_pipe", client_user_pipe_recv_message_success, send_user_pipe_id);
@@ -657,9 +706,9 @@ int make_pipe(cmds_allinfo &ccmds_info){
     /* decrease , increase and close pipe number after exec each time (different between ordinary and number pipe) */
     close_decrease_pipe(ccmds_info.isordpipe);
 
-    if(ccmds_info.fdin != current_client->client_fd){
-        close(ccmds_info.fdin);
-    }
+    // if(ccmds_info.fdin != current_client->client_fd){
+    //     close(ccmds_info.fdin);
+    // }
     /* erase user pipe which has been used */
     for(int i=0; i<waited_close_user_pipe.size(); i++){
         vector<int> record_erase_id = {};
@@ -672,7 +721,17 @@ int make_pipe(cmds_allinfo &ccmds_info){
             //cout<<client_info_table[waited_close_user_pipe[i]]._user_pipe[record_erase_id[j]].fdin<<" ";
             //cout<<client_info_table[waited_close_user_pipe[i]]._user_pipe[record_erase_id[j]].fdout<<endl;
             close(client_info_table[waited_close_user_pipe[i]]._user_pipe[record_erase_id[j]].fdin);
-            /*  ????????????????????????????????????? */
+            /*
+                bug: originally, I closed the user pipe's fdin and fdout, then it has something wrong.
+                For example, client 1 transmit "ls >2" to client 2, and it use fdin -> 6 and fdout -> 7.
+                When client 2 get the message from client 1 and using pipe like "cat <1 | number", I think
+                it will use fdin -> 6 and fdout -> 9, but it is not true.
+                Since when client 2 want to receive the message from client 1, its fdin will connect to 
+                fdin -> 6 and close fdout -> 7, then it will make ordinary pipe, in this time, due to fd -> 7
+                has been closed, the pipe's fd are fdin -> 7 and fdout -> 8, so we only need to close user
+                pipe's fdin due to we have closed user pipe's fdout when its need to receive the user pipe's message.
+                [ bug fixed at commit 820a7399fb685d3c3b9ec9e518e218d406493495 ]
+            */
             //close(client_info_table[waited_close_user_pipe[i]]._user_pipe[record_erase_id[j]].fdout);
             client_info_table[waited_close_user_pipe[i]]._user_pipe.erase(record_erase_id[j]);
         }
@@ -781,10 +840,10 @@ int exec_cmds(cmds_allinfo ccmds_info){
         }
 
         /* check command is exist or not */
-        // if(check_command(ccmds_info.cmds[0]) == false){
-        //     cerr<<"Unknown command: ["<<ccmds_info.cmds[0]<<"].\n";
-        //     exit(1);
-        // }
+        if(check_command(ccmds_info.cmds[0]) == false){
+            cerr<<"Unknown command: ["<<ccmds_info.cmds[0]<<"].\n";
+            exit(1);
+        }
 
         if(execvp(args[0],args) < 0){
             cerr<<"Unknown command: ["<<ccmds_info.cmds[0]<<"].\n";
@@ -797,7 +856,7 @@ int exec_cmds(cmds_allinfo ccmds_info){
     else{
         /*
             bug: Since i wait child process when the current commands at the end
-            and it is not pipe operation, the parent process may run end befofe 
+            and it is not pipe operation, the parent process may run end before 
             child process. that is, it will back to the main function and output "%"
             then output the child process's message.
             Hence, I use sleep in parent process to make it wait a minute to run and 
@@ -805,7 +864,7 @@ int exec_cmds(cmds_allinfo ccmds_info){
             [ bug fixed at commit ff38e0536d4fc9dd8bd803c754212bb5874de753 ]
         */
         /* UNSURE & NEED TO CHECK !!! */
-        sleep(1);
+        //sleep(1);
         // int status;
         // waitpid(_pid, &status, 0);
 
@@ -818,20 +877,20 @@ int exec_cmds(cmds_allinfo ccmds_info){
     return 0;
 }
 
-// bool check_command(string filename){
-//     string filepath;
-//     for(auto it:_path){
-//         filepath = it + "/" + filename;
-//         /* 
-//             originally use open but something wrong, because it will open file.
-//             So, google say "access" ! nice !
-//         */
-//         if((access(filepath.c_str(), F_OK)) != -1){
-//             return true;
-//         }
-//     }
-//     return false;
-// }
+bool check_command(string filename){
+    string filepath;
+    for(auto it:current_client->client_path){
+        filepath = it + "/" + filename;
+        /* 
+            originally use open but something wrong, because it will open file.
+            So, google say "access" ! nice !
+        */
+        if((access(filepath.c_str(), F_OK)) != -1){
+            return true;
+        }
+    }
+    return false;
+}
 
 /* signal handler */
 void killzombieprocess(int sig){
@@ -965,12 +1024,14 @@ void _setenv(string name, string value){
     /* setenv(char*, char*, int) */
     setenv(name.c_str(), value.c_str(), 1);
     /* renew the total path */
-    // _path.clear();
-    // _path = split_inputPath(value);
-    // for(auto it:_path){
-    //     cout<<it<<" ";
-    // }
-    // cout<<endl;
+    if(name == "PATH"){
+        current_client->client_path.clear();
+        current_client->client_path = split_inputPath(value);
+        // for(auto it:current_client->client_path){
+        //     cout<<it<<" ";
+        // }
+        // cout<<endl;
+    }
 }
 
 void _printenv(string name){
