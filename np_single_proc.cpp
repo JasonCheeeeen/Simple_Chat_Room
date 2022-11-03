@@ -90,6 +90,7 @@ unordered_map<int, client_information> client_info_table; // store current total
 
 /* current client information */
 struct client_information* current_client;
+
 /* current client's command */
 string client_command;
 /* record user pipe error */
@@ -201,15 +202,9 @@ int main(int argc, char* argv[]){
                     cerr<<"Client's connection over 30 !\n";
                     continue;
                 }
+
                 /* store client information to client table by using id */
                 client_info_table[_client_id] = cinfo;
-
-                /* server output new client's id and fd */
-                cout<<"###################################################\n";
-                cout<<"\n";
-                cout<<"           New client !! id = "<<_client_id<<" & fd = "<<ssock<<"\n";
-                cout<<"\n";
-                cout<<"###################################################\n\n";
 
                 FD_SET(ssock, &afds);
                 welcomemsg(ssock);
@@ -253,13 +248,6 @@ int main(int argc, char* argv[]){
                     dup2(STDIN_FILENO, STDOUT_FILENO);
                     dup2(STDIN_FILENO, STDERR_FILENO);
 
-                    /* server output logout client's id and fd */
-                    cout<<"###################################################\n";
-                    cout<<"\n";
-                    cout<<"         client logout !! id = "<<_map_id<<" & fd = "<<fd<<"\n";
-                    cout<<"\n";
-                    cout<<"###################################################\n\n";
-
                     /* clear client in afds */
                     FD_CLR(fd, &afds);
                 }
@@ -282,13 +270,6 @@ int main(int argc, char* argv[]){
                         close(STDERR_FILENO);
                         dup2(STDIN_FILENO, STDOUT_FILENO);
                         dup2(STDIN_FILENO, STDERR_FILENO);
-
-                        /* server output logout client's id and fd */
-                        cout<<"###################################################\n";
-                        cout<<"\n";
-                        cout<<"         client logout !! id = "<<_map_id<<" & fd = "<<fd<<"\n";
-                        cout<<"\n";
-                        cout<<"###################################################\n\n";
                         
                         /* clear client in afds */
                         FD_CLR(fd, &afds);
@@ -331,13 +312,6 @@ int setServerTCP(int port){
         return 0;
     }
 
-    /* server output welcome */
-    cout<<"\n###################################################\n";
-    cout<<"\n";
-    cout<<"        server ready, waiting for client...\n";
-    cout<<"\n";
-    cout<<"###################################################\n\n";
-
     /* listen */
     listen(msock, 0);
     return msock;
@@ -346,9 +320,9 @@ int setServerTCP(int port){
 /* delete logout client and client's revelent fds */
 void eraselogoutfd(int _id){
     /* delete user pipe who want to send message to target */
-    for(auto it:client_info_table){
+    for(auto &it:client_info_table){
         vector<int> neederaseid;
-        for(auto _it:it.second._user_pipe){
+        for(auto &_it:it.second._user_pipe){
             if(_it.first == _id){
                 close(_it.second.fdin);
                 close(_it.second.fdout);
@@ -441,7 +415,6 @@ void welcomemsg(int _ssock){
 
 /* shell's main function */
 int shellMain(int _id, string _input_cmd){
-    
     /* initialize some global variables */
     user_pipe_error = false;
     client_command = "";
@@ -467,7 +440,7 @@ int shellMain(int _id, string _input_cmd){
     /* dup stdout & stderr to client's fd */
     dup2(current_client->client_fd, STDOUT_FILENO);
     dup2(current_client->client_fd, STDERR_FILENO);
-
+    //cout<<_input_cmd<<endl;
     /* transform environment to current client's environment */
     clearenv();
     for(auto _env:current_client->client_env){
@@ -589,7 +562,7 @@ int part_cmds(vector<string> cmds){
             }
             /* check pipe is already exist or not */
             else if(current_client->_user_pipe.find(user_pipe_recv_id) != current_client->_user_pipe.end()){
-                senduserpipemsg = ("*** Error: the pipe #" + to_string(current_client->client_id) + "->#" + to_string(user_pipe_recv_id) + " already exist. ***\n");
+                senduserpipemsg = ("*** Error: the pipe #" + to_string(current_client->client_id) + "->#" + to_string(user_pipe_recv_id) + " already exists. ***\n");
                 client_user_pipe_send_message_fail = senduserpipemsg;
             }
             else{
@@ -935,14 +908,14 @@ int make_user_pipe_in(int _id){
 ////////////////////     built-in function code     ////////////////////
 
 void _who(){
-    string who_msg = "<ID>  <nickname>  <IP:Port>   <indicate me>\n";
+    string who_msg = "<ID>\t<nickname>\t<IP:port>\t<indicate me>\n";
     cout<<who_msg;
     for(int i=0;i<MAX_CLIENT_USER;i++){
         if(client_id_table[i] == 1){
             client_information who_client = client_info_table[i+1]; // id is id-table + 1
-            who_msg = (to_string(i+1) + "   " + who_client.client_name + "  " + who_client.client_ip + ":" + to_string(who_client.client_port));
+            who_msg = (to_string(i+1) + "\t" + who_client.client_name + "\t" + who_client.client_ip + ":" + to_string(who_client.client_port));
             if(current_client->client_id == (i+1)){
-                who_msg += "    <-me\n";
+                who_msg += "\t<-me\n";
             }
             else{
                 who_msg += "\n";
