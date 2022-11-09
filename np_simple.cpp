@@ -108,6 +108,7 @@ int main(int argc, char* argv[]){
             close(ssock);
         }
     }
+    close(msock);
     exit(0);
 }
 

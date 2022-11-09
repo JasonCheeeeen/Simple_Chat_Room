@@ -105,6 +105,8 @@ string client_user_pipe_recv_message_success;
 string client_user_pipe_recv_message_fail;
 /* erase user pipe which has been read */
 vector<int> waited_close_user_pipe;
+/* user pipe error detection */
+int devnull_fd;
 
 ////////////////////     shell function     ////////////////////
 
@@ -154,13 +156,15 @@ void _name(vector<string>);
 
 int main(int argc, char* argv[]){
     if(argc != 2){
-        cerr<<"input error: ./[program name] [port]\n";
+        cerr<<"input error: ./[program name] [port]"<<endl;
         exit(1);
     }
     /* create TCP server */
     int s_port = atoi(argv[1]);
     msock = setServerTCP(s_port);
     
+    setenv("PATH", "bin:.", 1);
+
     /* server used to detect client */
     nfds = getdtablesize();
     FD_ZERO(&afds);
@@ -184,7 +188,7 @@ int main(int argc, char* argv[]){
             int ssock;
             socklen_t _cinlen = sizeof(_cin);
             if((ssock = accept(msock, (struct sockaddr*) &_cin, &_cinlen)) < 0){
-                cerr<<"Accept Client fault !\n";
+                cerr<<"Accept Client fault !"<<endl;
             }
             else{
                 /* new client information */
@@ -199,7 +203,7 @@ int main(int argc, char* argv[]){
                 int _client_id = getClientID();
                 cinfo.client_id = _client_id;
                 if(_client_id == -1){
-                    cerr<<"Client's connection over 30 !\n";
+                    cerr<<"Client's connection over 30 !"<<endl;
                     continue;
                 }
 
@@ -215,7 +219,7 @@ int main(int argc, char* argv[]){
                 /* write % to client to start service */
                 string _bash = "% ";
                 if(send(cinfo.client_fd, _bash.c_str(), _bash.size(), 0) < 0){
-                    cerr<<"write '%' to client fault !\n";
+                    cerr<<"write '%' to client fault !"<<endl;
                 }
             }
         }
@@ -233,7 +237,7 @@ int main(int argc, char* argv[]){
                 /* client log out */
                 if((n = recv(fd, _input, sizeof(_input), 0)) <= 0){
                     if(n < 0){
-                        cerr<<"recv fault !\n";
+                        cerr<<"recv fault !"<<endl;
                     }
                     broadcast(client_info_table[_map_id], "log-out", "", -1);
                     /* let another client can use this id */
@@ -288,14 +292,14 @@ int setServerTCP(int port){
 
     /* SOCK_STREAM -> TCP */
     if((msock = socket(AF_INET, SOCK_STREAM, 0)) < 0){
-        cerr<<"Create TCP Server fault !\n";
+        cerr<<"Create TCP Server fault !"<<endl;
         return 0;
     }
 
     /* set socker -> setsocketopt, allow different ip to use same port */
     const int opt = 1;
     if(setsockopt(msock, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0){
-        cerr<<"Set Socket With setsockopt fault !\n";
+        cerr<<"Set Socket With setsockopt fault !"<<endl;
         return 0;
     }
 
@@ -308,7 +312,7 @@ int setServerTCP(int port){
 
     /* bind socket */
     if(bind(msock, (sockaddr*) &_sin, sizeof(_sin)) == -1){
-        cerr<<"Bind Server Socket fault !\n";
+        cerr<<"Bind Server Socket fault !"<<endl;
         return 0;
     }
 
@@ -319,6 +323,7 @@ int setServerTCP(int port){
 
 /* delete logout client and client's revelent fds */
 void eraselogoutfd(int _id){
+    /* 4.txt */
     /* delete user pipe who want to send message to target */
     for(auto &it:client_info_table){
         vector<int> neederaseid;
@@ -371,7 +376,7 @@ void broadcast(struct client_information cInfo, string func, string msg, int tar
         }
         if(FD_ISSET(fd, &afds)){
             if(send(fd, broadcast_msg.c_str(), broadcast_msg.size(), 0) < 0){
-                cerr<<"Broadcast to "<<fd<<" fault !\n";
+                cerr<<"Broadcast to "<<fd<<" fault !"<<endl;
             }
         }
     }
@@ -425,6 +430,8 @@ int shellMain(int _id, string _input_cmd){
     client_user_pipe_send_message_fail = "";
     client_user_pipe_recv_message_fail = "";
     waited_close_user_pipe.clear();
+    devnull_fd = open("/dev/null", O_RDWR);
+    //cout<<devnull_fd<<endl;
 
     /* record this time exec result */
     int res_exec;
@@ -472,7 +479,7 @@ int shellMain(int _id, string _input_cmd){
     // }
     string _bash = "% ";
     if(send(current_client->client_fd, _bash.c_str(), _bash.size(), 0) == -1){
-        cerr<<"write '%' to client fault !\n";
+        cerr<<"write '%' to client fault !"<<endl;
     }
     return res_exec;
 }
@@ -557,13 +564,15 @@ int part_cmds(vector<string> cmds){
             /* check receiver client exist or not */
             string senduserpipemsg;
             if(client_id_table[user_pipe_recv_id-1] == 0){
-                senduserpipemsg = ("*** Error: user #" + to_string(user_pipe_recv_id) + " does not exist yet. ***\n");
+                senduserpipemsg = ("*** Error: user #" + to_string(user_pipe_recv_id) + " does not exist yet. ***");
                 client_user_pipe_send_message_fail = senduserpipemsg;
+                cmds_info.fdout = devnull_fd;
             }
             /* check pipe is already exist or not */
             else if(current_client->_user_pipe.find(user_pipe_recv_id) != current_client->_user_pipe.end()){
-                senduserpipemsg = ("*** Error: the pipe #" + to_string(current_client->client_id) + "->#" + to_string(user_pipe_recv_id) + " already exists. ***\n");
+                senduserpipemsg = ("*** Error: the pipe #" + to_string(current_client->client_id) + "->#" + to_string(user_pipe_recv_id) + " already exists. ***");
                 client_user_pipe_send_message_fail = senduserpipemsg;
+                cmds_info.fdout = devnull_fd;
             }
             else{
                 /* create user pipe */
@@ -594,13 +603,15 @@ int part_cmds(vector<string> cmds){
             /* check send client exist or not */
             string recvuserpipemsg;
             if(client_id_table[user_pipe_send_id-1] == 0){
-                recvuserpipemsg = ("*** Error: user #" + to_string(user_pipe_send_id) + " does not exist yet. ***\n");
+                recvuserpipemsg = ("*** Error: user #" + to_string(user_pipe_send_id) + " does not exist yet. ***");
                 client_user_pipe_recv_message_fail = recvuserpipemsg;
+                cmds_info.fdin = devnull_fd;
             }
             /* check pipe is already exist or not */
             else if(client_info_table[user_pipe_send_id]._user_pipe.find(current_client->client_id) == client_info_table[user_pipe_send_id]._user_pipe.end()){
-                recvuserpipemsg = ("*** Error: the pipe #" + to_string(user_pipe_send_id) + "->#" + to_string(current_client->client_id) + " does not exist yet. ***\n");
+                recvuserpipemsg = ("*** Error: the pipe #" + to_string(user_pipe_send_id) + "->#" + to_string(current_client->client_id) + " does not exist yet. ***");
                 client_user_pipe_recv_message_fail = recvuserpipemsg;
+                cmds_info.fdin = devnull_fd;
             }
             else{
                 /* connect to user pipe */
@@ -644,35 +655,35 @@ int make_pipe(cmds_allinfo &ccmds_info){
     int res_exec;
 
     /* process the user pipe's message */
-    if(client_user_pipe_recv_message_fail.size() != 0){
-        cout<<client_user_pipe_recv_message_fail;
-        client_user_pipe_recv_message_fail = "";
-        user_pipe_error = true;
-    }
-    if(client_user_pipe_send_message_fail.size() != 0){
-        cout<<client_user_pipe_send_message_fail;
-        client_user_pipe_send_message_fail = "";
-        user_pipe_error = true;
-    }
-    /* prevent error user pipe to run execvp */
-    if(user_pipe_error == true){
-        if(check_command(ccmds_info.cmds[0]) == false){
-            cerr<<"Unknown command: ["<<ccmds_info.cmds[0]<<"].\n";
-        }
-        close_decrease_pipe(ccmds_info.isordpipe);
-        user_pipe_error = false;
-        return res_exec;
-    }
     if(client_user_pipe_recv_message_success.size() != 0){
         broadcast((*current_client), "recv_user_pipe", client_user_pipe_recv_message_success, send_user_pipe_id);
         send_user_pipe_id = -1;
         client_user_pipe_recv_message_success = "";
+    }
+    if(client_user_pipe_recv_message_fail.size() != 0){
+        cout<<client_user_pipe_recv_message_fail<<endl;
+        client_user_pipe_recv_message_fail = "";
+        user_pipe_error = true;
     }
     if(client_user_pipe_send_message_success.size() != 0){
         broadcast((*current_client), "send_user_pipe", client_user_pipe_send_message_success, recv_user_pipe_id);
         recv_user_pipe_id = -1;
         client_user_pipe_send_message_success = "";
     }
+    if(client_user_pipe_send_message_fail.size() != 0){
+        cout<<client_user_pipe_send_message_fail<<endl;
+        client_user_pipe_send_message_fail = "";
+        user_pipe_error = true;
+    }
+    /* prevent error user pipe to run execvp */
+    // if(user_pipe_error == true){
+    //     if(check_command(ccmds_info.cmds[0]) == false){
+    //         cerr<<"Unknown command: ["<<ccmds_info.cmds[0]<<"].\n";
+    //     }
+    //     close_decrease_pipe(ccmds_info.isordpipe);
+    //     user_pipe_error = false;
+    //     return res_exec;
+    // }
 
     ccmds_info.fdin = make_pipe_in(ccmds_info.fdin);
     res_exec = exec_cmds(ccmds_info);
@@ -814,13 +825,13 @@ int exec_cmds(cmds_allinfo ccmds_info){
 
         /* check command is exist or not */
         if(check_command(ccmds_info.cmds[0]) == false){
-            cerr<<"Unknown command: ["<<ccmds_info.cmds[0]<<"].\n";
-            exit(1);
+            cerr<<"Unknown command: ["<<ccmds_info.cmds[0]<<"]."<<endl;
+            exit(0);
         }
 
         if(execvp(args[0],args) < 0){
-            cerr<<"Unknown command: ["<<ccmds_info.cmds[0]<<"].\n";
-            exit(1);
+            cerr<<"Unknown command: ["<<ccmds_info.cmds[0]<<"]."<<endl;
+            exit(0);
         }
         /* test execvp execute success by checking this output appear or not */
         // perror("execvp success ???\n");
@@ -837,7 +848,7 @@ int exec_cmds(cmds_allinfo ccmds_info){
             [ bug fixed at commit ff38e0536d4fc9dd8bd803c754212bb5874de753 ]
         */
         /* UNSURE & NEED TO CHECK !!! */
-        //sleep(1);
+        sleep(1);
         // int status;
         // waitpid(_pid, &status, 0);
 
@@ -908,19 +919,16 @@ int make_user_pipe_in(int _id){
 ////////////////////     built-in function code     ////////////////////
 
 void _who(){
-    string who_msg = "<ID>\t<nickname>\t<IP:port>\t<indicate me>\n";
-    cout<<who_msg;
+    string who_msg = "<ID>\t<nickname>\t<IP:port>\t<indicate me>";
+    cout<<who_msg<<endl;
     for(int i=0;i<MAX_CLIENT_USER;i++){
         if(client_id_table[i] == 1){
             client_information who_client = client_info_table[i+1]; // id is id-table + 1
             who_msg = (to_string(i+1) + "\t" + who_client.client_name + "\t" + who_client.client_ip + ":" + to_string(who_client.client_port));
             if(current_client->client_id == (i+1)){
-                who_msg += "\t<-me\n";
+                who_msg += "\t<-me";
             }
-            else{
-                who_msg += "\n";
-            }
-            cout<<who_msg;
+            cout<<who_msg<<endl;
         }
     }
     return;
@@ -943,12 +951,12 @@ void _tell(vector<string> _cmds){
         int recv_fd = client_info_table[recv_id].client_fd;
         string _tell_msg = ("*** " + current_client->client_name + " told you ***: " + tell_msg); 
         if(send(recv_fd, _tell_msg.c_str(), _tell_msg.size(), 0) < 0){
-            cerr<<"send _tell message fault !\n";
+            cerr<<"send _tell message fault !"<<endl;
         }
     }
     else{
-        string _tell_msg = ("*** Error: user #" + _cmds[1] + " does not exist yet. ***\n");
-        cout<<_tell_msg;
+        string _tell_msg = ("*** Error: user #" + _cmds[1] + " does not exist yet. ***");
+        cout<<_tell_msg<<endl;
     }
     return;
 }
@@ -981,8 +989,8 @@ void _name(vector<string> _cmds){
     string name_msg;
     for(auto it:client_info_table){
         if(it.second.client_name == name){
-            name_msg = ("*** User '" + name + "' already exists. ***\n");
-            cout<<name_msg;
+            name_msg = ("*** User '" + name + "' already exists. ***");
+            cout<<name_msg<<endl;
             return;
         }
     }
