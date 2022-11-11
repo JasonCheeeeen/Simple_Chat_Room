@@ -394,6 +394,9 @@ void broadcast(int _client_id, string _type, string _msg, int _target_id){
     else if(_type == "tell"){
         broadcast_msg = _msg;
     }
+    else if(_type == "user_pipe"){
+        broadcast_msg = _msg;
+    }
     else if(_type == "send_user_pipe"){
         broadcast_msg = ("*** " + string(shm_clientInfo_tmp[_client_id-1].client_name) + " (#" + to_string(_client_id) + ") just piped '" + _msg + "' to " + string(shm_clientInfo_tmp[_target_id-1].client_name) + " (#" + to_string(_target_id) + ") ***");
     }
@@ -404,7 +407,7 @@ void broadcast(int _client_id, string _type, string _msg, int _target_id){
     memset(shm_clientMsg_tmp, '\0', MAX_CLIENT_MESSAGE);
     strncpy(shm_clientMsg_tmp, broadcast_msg.c_str(), MAX_CLIENT_MESSAGE);
     shmdt(shm_clientMsg_tmp);
-    usleep(100);
+    //usleep(100);
     /* broadcast to one client */
     if(_type == "tell" || _type == "who"){
         kill(shm_clientInfo_tmp[_target_id-1].client_pid, SIGUSR1);
@@ -832,10 +835,18 @@ void part_cmds(vector<string> cmds){
 
 void make_pipe(cmds_allinfo &ccmds_info){
 
+    string broadcast_msg = "";
+    client_information* shm_clientInfo_tmpp;
+    if((shm_clientInfo_tmpp = (client_information*)shmat(shm_clientInfo_global, NULL, 0)) == (client_information*)-1){
+        cerr<<"match client_information's share memory start fail ! (broadcast)"<<endl;
+        return;
+    }
+
     /* process the user pipe's message */
     if(client_user_pipe_recv_message_success.size() != 0){
-        broadcast(client_id_global, "recv_user_pipe", client_user_pipe_recv_message_success, send_user_pipe_id);
-        usleep(100);
+        broadcast_msg += ("*** " + string(shm_clientInfo_tmpp[client_id_global-1].client_name) + " (#" + to_string(client_id_global) + ") just received from " + string(shm_clientInfo_tmpp[send_user_pipe_id-1].client_name) + " (#" + to_string(send_user_pipe_id) + ") by '" + client_user_pipe_recv_message_success + "' ***");
+        //broadcast(client_id_global, "recv_user_pipe", client_user_pipe_recv_message_success, send_user_pipe_id);
+        //usleep(100);
         client_user_pipe_recv_message_success = "";
     }
     if(client_user_pipe_recv_message_fail.size() != 0){
@@ -843,10 +854,18 @@ void make_pipe(cmds_allinfo &ccmds_info){
         client_user_pipe_recv_message_fail = "";
     }
     if(client_user_pipe_send_message_success.size() != 0){
-        broadcast(client_id_global, "send_user_pipe", client_user_pipe_send_message_success, recv_user_pipe_id);
-        usleep(100);
+        if(broadcast_msg.size() != 0){
+            broadcast_msg += "\n";
+        }
+        broadcast_msg += ("*** " + string(shm_clientInfo_tmpp[client_id_global-1].client_name) + " (#" + to_string(client_id_global) + ") just piped '" + client_user_pipe_send_message_success + "' to " + string(shm_clientInfo_tmpp[recv_user_pipe_id-1].client_name) + " (#" + to_string(recv_user_pipe_id) + ") ***");
+        //broadcast(client_id_global, "send_user_pipe", client_user_pipe_send_message_success, recv_user_pipe_id);
+        //usleep(100);
         client_user_pipe_send_message_success = "";
     }
+    if(broadcast_msg.size() != 0){
+        broadcast(client_id_global, "user_pipe", broadcast_msg, -1);
+    }
+    shmdt(shm_clientInfo_tmpp);
     if(client_user_pipe_send_message_fail.size() != 0){
         cout<<client_user_pipe_send_message_fail<<endl;
         client_user_pipe_send_message_fail = "";
@@ -883,7 +902,7 @@ void make_pipe(cmds_allinfo &ccmds_info){
         shm_clientInfo_tmp[send_user_pipe_id-1].client_fifo[client_id_global-1].file_exist = false;
         shm_clientInfo_tmp[send_user_pipe_id-1].client_fifo[client_id_global-1].file_in = -1;
         shm_clientInfo_tmp[send_user_pipe_id-1].client_fifo[client_id_global-1].file_out = -1;
-        unlink(shm_clientInfo_tmp[send_user_pipe_id-1].client_fifo[client_id_global-1].file_name);
+        remove(shm_clientInfo_tmp[send_user_pipe_id-1].client_fifo[client_id_global-1].file_name);
         memset(shm_clientInfo_tmp[send_user_pipe_id-1].client_fifo[client_id_global-1].file_name, '\0', MAX_FILE_LENGTH);
     }
     shmdt(shm_clientInfo_tmp);
@@ -896,6 +915,7 @@ void make_pipe(cmds_allinfo &ccmds_info){
     ccmds_info.endofcmds = false;
     ccmds_info.isordpipe = false;
 
+    /* initialize the send and recv user pipe id */
     send_user_pipe_id = -1;
     recv_user_pipe_id = -1;
 }
