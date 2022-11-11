@@ -17,7 +17,7 @@
 #include<sys/socket.h>
 #include<sys/stat.h>
 #include<sys/ipc.h> // mkfifo
-#include<sys/shm.h>
+#include<sys/shm.h> // shmget shmat
 using namespace std;
 
 #define MAX_CLIENT_USER 30
@@ -52,11 +52,13 @@ struct Fifo{
     int file_in;
     int file_out;
     bool file_exist;
+    bool file_used;
     Fifo(){
         memset(file_name, '\0', MAX_FILE_LENGTH);
         file_in = -1;
         file_out = -1;
         file_exist = false;
+        file_used = false;
     }
 };
 
@@ -69,6 +71,7 @@ struct client_information{
     char client_name[MAX_CLIENT_NAME];
     char client_ip[INET_ADDRSTRLEN];
     Fifo client_fifo[MAX_CLIENT_USER];
+    bool client_recv[MAX_CLIENT_USER];
     client_information(){
         client_id = -1;
         client_pid = -1;
@@ -76,6 +79,7 @@ struct client_information{
         client_exist = false;
         memset(client_name, '\0', MAX_CLIENT_NAME);
         memset(client_ip, '\0', INET_ADDRSTRLEN);
+        memset(client_recv, false, MAX_CLIENT_USER);
     }
 };
 
@@ -90,12 +94,28 @@ int client_id_global;
 /* store pipe's file descriptor */
 map<int,vector<int>> _pipe;
 
+/* store input command */
+string client_command;
+
+/* record user pipe send message */
+int send_user_pipe_id;
+string client_user_pipe_send_message_success;
+string client_user_pipe_send_message_fail;
+/* record user pipe receiver message */
+int recv_user_pipe_id;
+string client_user_pipe_recv_message_success;
+string client_user_pipe_recv_message_fail;
+/* user pipe error detection */
+int devnull_fd;
+
 ////////////////////     shell function     ////////////////////
 
 /* pipe's function */
 int get_pipe_num(string);
 int make_pipe_in(int); // get pipe read's file descriptor
 int make_pipe_out(int); // get pipe write's file descriptor
+int make_user_pipe_in(int); // get user read's file descriptor
+int make_user_pipe_out(int); //get user pipe write's descriptor
 void close_decrease_pipe(bool); // close 0 and decrease others after number pipe and increase after ordinary pipe
 void part_cmds(vector<string>);
 void make_pipe(cmds_allinfo&);
@@ -109,7 +129,7 @@ int setServerTCP(int);
 int getClientID();
 /* shell main function */
 void shellMain(int);
-void setClientInfo(int, int, struct sockaddr_in);
+void setClientInfo(int, struct sockaddr_in);
 void eraselogoutfifo(int);
 void setShareMM();
 void server_signal_handler(int);
@@ -121,9 +141,9 @@ void broadcast(int, string, string, int);
 ////////////////////     built-in function     ////////////////////
 void _setenv(string,string);
 void _printenv(string);
-// void _who(void);
-// void _tell(vector<string>);
-// void _yell(vector<string>);
+void _who(void);
+void _tell(vector<string>);
+void _yell(vector<string>);
 void _name(vector<string>);
 void welcomemsg();
 
@@ -170,11 +190,12 @@ int main(int argc, char* argv[]){
 
             int _client_id;
             if((_client_id = getClientID()) == -1){
+                cout<<"number of clients are full of limit !"<<endl;
                 continue;
             }
 
             // cout<<_client_id<<endl;
-            setClientInfo(ssock, _client_id, _cin);
+            setClientInfo(_client_id, _cin);
             shellMain(_client_id);
             
             /* client exit */
@@ -273,7 +294,7 @@ void eraselogoutfifo(int __client_id){
             shm_clientInfo_tmp[i].client_fifo[__client_id-1].file_exist = false;
             shm_clientInfo_tmp[i].client_fifo[__client_id-1].file_in = -1;
             shm_clientInfo_tmp[i].client_fifo[__client_id-1].file_out = -1;
-            remove(shm_clientInfo_tmp[i].client_fifo[__client_id-1].file_name);
+            unlink(shm_clientInfo_tmp[i].client_fifo[__client_id-1].file_name);
             memset(shm_clientInfo_tmp[i].client_fifo[__client_id-1].file_name, '\0', MAX_FILE_LENGTH);
         }
     }
@@ -282,7 +303,7 @@ void eraselogoutfifo(int __client_id){
 }
 
 /* set new client's information */
-void setClientInfo(int _ssock, int __client_id, struct sockaddr_in __cin){
+void setClientInfo(int __client_id, struct sockaddr_in __cin){
     client_information* shm_clientInfo_tmp;
     if((shm_clientInfo_tmp = (client_information*)shmat(shm_clientInfo_global, NULL, 0)) == (client_information*)-1){
         cerr<<"set client's information fail ! (setClientInfo)"<<endl;
@@ -336,6 +357,7 @@ void setShareMM(){
         shm_clientInfo_tmp[i].client_exist = false;
         for(int j=0; j<MAX_CLIENT_USER; j++){
             shm_clientInfo_tmp[i].client_fifo[j].file_exist = false;
+            shm_clientInfo_tmp[i].client_fifo[j].file_used = false;
         }
     }
     shmdt(shm_clientInfo_tmp);
@@ -350,30 +372,56 @@ void broadcast(int _client_id, string _type, string _msg, int _target_id){
         cerr<<"match client_information's share memory start fail ! (broadcast)"<<endl;
         return;
     }
-    char* shm_clientmsg_tmp;
-    if((shm_clientmsg_tmp = (char*)shmat(shm_clientMsg_global, NULL, 0)) == (char*)-1){
+    char* shm_clientMsg_tmp;
+    if((shm_clientMsg_tmp = (char*)shmat(shm_clientMsg_global, NULL, 0)) == (char*)-1){
         cerr<<"match client_message's share memory start fail ! (broadcast)"<<endl;
         return;
     }
 
     if(_type == "log-in"){
         broadcast_msg = ("*** User '" + string(shm_clientInfo_tmp[_client_id-1].client_name) + "' entered from " + string(shm_clientInfo_tmp[_client_id-1].client_ip) + ":" + to_string(shm_clientInfo_tmp[_client_id-1].client_port) + ". ***");
-        // cout<<broadcast_msg<<endl;
+       // cout<<broadcast_msg<<endl;
     }
-    if(_type == "name"){
+    else if(_type == "log-out"){
+        broadcast_msg = ("*** User '" + string(shm_clientInfo_tmp[_client_id-1].client_name) + "' left. ***");
+    }
+    else if(_type == "name"){
         broadcast_msg = _msg;
     }
+    else if(_type == "yell"){
+        broadcast_msg = _msg;
+    }
+    else if(_type == "tell"){
+        broadcast_msg = _msg;
+    }
+    else if(_type == "send_user_pipe"){
+        broadcast_msg = ("*** " + string(shm_clientInfo_tmp[_client_id-1].client_name) + " (#" + to_string(_client_id) + ") just piped '" + _msg + "' to " + string(shm_clientInfo_tmp[_target_id-1].client_name) + " (#" + to_string(_target_id) + ") ***");
+    }
+    else if(_type == "recv_user_pipe"){
+        broadcast_msg = ("*** " + string(shm_clientInfo_tmp[_client_id-1].client_name) + " (#" + to_string(_client_id) + ") just received from " + string(shm_clientInfo_tmp[_target_id-1].client_name) + " (#" + to_string(_target_id) + ") by '" + _msg + "' ***");
+    }
 
-    memset(shm_clientmsg_tmp, '\0', MAX_CLIENT_MESSAGE);
-    strncpy(shm_clientmsg_tmp, broadcast_msg.c_str(), MAX_CLIENT_MESSAGE);
-    for(int i=0; i<MAX_CLIENT_USER; i++){
-        if(shm_clientInfo_tmp[i].client_exist == true){
-            kill(shm_clientInfo_tmp[i].client_pid, SIGUSR1);
+    memset(shm_clientMsg_tmp, '\0', MAX_CLIENT_MESSAGE);
+    strncpy(shm_clientMsg_tmp, broadcast_msg.c_str(), MAX_CLIENT_MESSAGE);
+    shmdt(shm_clientMsg_tmp);
+    usleep(100);
+    /* broadcast to one client */
+    if(_type == "tell" || _type == "who"){
+        kill(shm_clientInfo_tmp[_target_id-1].client_pid, SIGUSR1);
+    }
+    /* broadcast to all clients */
+    else{
+        for(int i=0; i<MAX_CLIENT_USER; i++){
+            if(shm_clientInfo_tmp[i].client_exist == true){
+                if(_type == "log-out" && i == _client_id-1){
+                    continue;
+                }
+                kill(shm_clientInfo_tmp[i].client_pid, SIGUSR1);
+            }
         }
     }
 
     shmdt(shm_clientInfo_tmp);
-    shmdt(shm_clientmsg_tmp);
     return;
 }
 
@@ -392,12 +440,13 @@ void server_signal_handler(int sig){
         };
     }
     else if(sig == SIGINT){
-        /* server exit, remove the share memory */
+        /* server exit, unlink the share memory */
         shmctl(shm_clientInfo_global, IPC_RMID, NULL);
         shmctl(shm_clientMsg_global, IPC_RMID, NULL);
         cout<<endl;
         exit(0);
     }
+    /* receive message from share memory of message */
     else if(sig == SIGUSR1){
         char* shm_clientMsg_tmp;
         if((shm_clientMsg_tmp = (char*)shmat(shm_clientMsg_global, NULL, 0)) == (char*)-1){
@@ -406,6 +455,23 @@ void server_signal_handler(int sig){
         }
         cout<<shm_clientMsg_tmp<<endl;
         shmdt(shm_clientMsg_tmp);
+    }
+    /* signal receiver client to open to avoid blocking the O_WRONLY */
+    else if(sig == SIGUSR2){
+        client_information* shm_clientInfo_tmp;
+        if((shm_clientInfo_tmp = (client_information*)shmat(shm_clientInfo_global, NULL, 0)) == (client_information*)-1){
+            cerr<<"match the client_information's share memory fail !"<<endl;
+            exit(1);
+        }
+        for(int i=0; i<MAX_CLIENT_USER; i++){
+            if(shm_clientInfo_tmp[client_id_global-1].client_recv[i] == true){
+                shm_clientInfo_tmp[client_id_global-1].client_recv[i] = false;
+                int user_pipe_fdin = open(shm_clientInfo_tmp[i].client_fifo[client_id_global-1].file_name, O_RDONLY);
+                // cout<<user_pipe_fdin<<endl;
+                shm_clientInfo_tmp[i].client_fifo[client_id_global-1].file_in = user_pipe_fdin;
+            }
+        }
+        shmdt(shm_clientInfo_tmp);
     }
     return;
 }
@@ -473,6 +539,74 @@ void _name(vector<string> cmds){
     return;
 }
 
+void _yell(vector<string> cmds){
+    client_information* shm_clientInfo_tmp;
+    if((shm_clientInfo_tmp = (client_information*)shmat(shm_clientInfo_global, NULL, 0)) == (client_information*)-1){
+        cerr<<"match client_information's share memory start fail ! (_yell)"<<endl;
+        exit(1);
+        return;
+    }
+    string yell_msg = "";
+    for(int i=1; i<cmds.size(); i++){
+        yell_msg += cmds[i];
+        if(i != cmds.size()-1){
+            yell_msg += " ";
+        }
+    }
+    string _yell_msg = ("*** " + string(shm_clientInfo_tmp[client_id_global-1].client_name) + " yelled ***: " + yell_msg);
+    shmdt(shm_clientInfo_tmp);
+    broadcast(client_id_global, "yell", _yell_msg, -1);
+    return;
+}
+
+void _tell(vector<string> cmds){
+    client_information* shm_clientInfo_tmp;
+    if((shm_clientInfo_tmp = (client_information*)shmat(shm_clientInfo_global, NULL, 0)) == (client_information*)-1){
+        cerr<<"match client_information's share memory start fail ! (_yell)"<<endl;
+        return;
+    }
+    int recv_id = stoi(cmds[1]);
+    string tell_msg = "";
+    for(int i=2; i<cmds.size(); i++){
+        tell_msg += cmds[i];
+        if(i != cmds.size()-1){
+            tell_msg += " ";
+        }
+    }
+    /* receiver exist */
+    if(shm_clientInfo_tmp[recv_id-1].client_exist == true){
+        string _tell_msg = ("*** " + string(shm_clientInfo_tmp[client_id_global-1].client_name) + " told you ***: " + tell_msg); 
+        broadcast(client_id_global, "tell", _tell_msg, recv_id);
+    }
+    else{
+        string _tell_msg = ("*** Error: user #" + cmds[1] + " does not exist yet. ***");
+        cout<<_tell_msg<<endl;
+    }
+    shmdt(shm_clientInfo_tmp);
+    return;
+}
+
+void _who(){
+    client_information* shm_clientInfo_tmp;
+    if((shm_clientInfo_tmp = (client_information*)shmat(shm_clientInfo_global, NULL, 0)) == (client_information*)-1){
+        cerr<<"match client_information's share memory start fail ! (_who)"<<endl;
+        return;
+    }
+    string who_msg = "<ID>\t<nickname>\t<IP:port>\t<indicate me>";
+    for(int i=0; i<MAX_CLIENT_USER; i++){
+        if(shm_clientInfo_tmp[i].client_exist == true){
+            who_msg += "\n";
+            who_msg += (to_string(shm_clientInfo_tmp[i].client_id) + "\t" + string(shm_clientInfo_tmp[i].client_name) + "\t" + string(shm_clientInfo_tmp[i].client_ip) + ":" + to_string(shm_clientInfo_tmp[i].client_port));
+            if(shm_clientInfo_tmp[i].client_id == client_id_global){
+                who_msg += "\t<-me";
+            }
+        }
+    }
+    cout<<who_msg<<endl;
+    shmdt(shm_clientInfo_tmp);
+    return;
+}
+
 ////////////////////     shell function code     ////////////////////
 
 /* shell's main function */
@@ -481,17 +615,20 @@ void shellMain(int _id){
     /* call client signals */
     /* share memory of MESSAGE */
     signal(SIGUSR1, server_signal_handler);
+    signal(SIGUSR2, server_signal_handler);
+
+    /* initialize some global variables */
+    devnull_fd = open("/dev/null", O_RDWR);
 
     welcomemsg();
     /* broadcast log in function */
     /*
         bug: cannot use broadcast before signal, it will cause 
         kernel cannot catch the proper handler, then kill the process.
-        [ bug fixxed ]
+        [ bug fixxed at commit: fab54abb34b60eac5dc248242f27d7c4b89e5b4e]
     */
     broadcast(_id, "log-in", "", -1);
 
-    /* initialize some global variables */
     clearenv();
     setenv("PATH", "bin:.", 1);
     _pipe.clear();
@@ -500,8 +637,18 @@ void shellMain(int _id){
     string input_cmd;
 
     while(1){
+
+        /* initialize some global variables */
+        send_user_pipe_id = -1;
+        recv_user_pipe_id = -1;
+        client_user_pipe_send_message_success = "";
+        client_user_pipe_recv_message_success = "";
+        client_user_pipe_send_message_fail = "";
+        client_user_pipe_recv_message_fail = "";
+
         cout<<"% ";
         getline(cin,input_cmd);
+        client_command = input_cmd;
         if(cin.eof()){
             cout<<endl;
             break;
@@ -511,9 +658,11 @@ void shellMain(int _id){
         }
         vector<string> cmds = split_inputCmds(input_cmd);
         if(cmds[0] == "exit"){
+            broadcast(_id, "log-out", "", -1);
             return;
         }
         part_cmds(cmds);
+
     }
     return;
 }
@@ -529,6 +678,11 @@ void part_cmds(vector<string> cmds){
     while(_cur < _size){
         if(cmds_info.cmds.size() == 0){
             cmds_info.cmds.push_back(cmds[_cur++]);
+            if(cmds_info.cmds[0] == "name" || cmds_info.cmds[0] == "yell" || cmds_info.cmds[0] == "tell"){
+                while(_cur < _size){
+                    cmds_info.cmds.push_back(cmds[_cur++]);
+                }
+            }
             /* check the last cmds, need to make pipe */
             if(_cur >= _size){
                 cmds_info.endofcmds = true;
@@ -570,6 +724,99 @@ void part_cmds(vector<string> cmds){
             }
             make_pipe(cmds_info);
         }
+        /* user pipe for clint message to another client */
+        else if(cmds[_cur][0] == '>' && cmds[_cur].size() > 1){
+            client_information* shm_clientInfo_tmp;
+            if((shm_clientInfo_tmp = (client_information*)shmat(shm_clientInfo_global, NULL, 0)) == (client_information*)-1){
+                cerr<<"match client_information's share memory start fail ! (>?)"<<endl;
+                return;
+            }
+            int user_pipe_recv_id;
+            user_pipe_recv_id = get_pipe_num(cmds[_cur]);
+            _cur++;
+            /* check receiver client exist or not */
+            string senduserpipemsg;
+            if(shm_clientInfo_tmp[user_pipe_recv_id-1].client_exist == false){
+                senduserpipemsg = ("*** Error: user #" + to_string(user_pipe_recv_id) + " does not exist yet. ***");
+                client_user_pipe_send_message_fail = senduserpipemsg;
+                cmds_info.fdout = devnull_fd;
+            }
+            /* check pipe is already exist or not */
+            else if(shm_clientInfo_tmp[client_id_global-1].client_fifo[user_pipe_recv_id-1].file_exist == true){
+                senduserpipemsg = ("*** Error: the pipe #" + to_string(client_id_global) + "->#" + to_string(user_pipe_recv_id) + " already exists. ***");
+                client_user_pipe_send_message_fail = senduserpipemsg;
+                cmds_info.fdout = devnull_fd;
+            }
+            else{
+                /* create user pipe */
+                cmds_info.fdout = make_user_pipe_out(user_pipe_recv_id);
+                /* broadcast cmds message to receiver client */
+                string _client_command = "";
+                for(int i=0; i<client_command.size();i++){
+                    if(client_command[i] == '\n' || client_command[i] == '\r'){
+                        continue;
+                    }
+                    _client_command += client_command[i];
+                }
+                client_user_pipe_send_message_success = _client_command;
+                recv_user_pipe_id = user_pipe_recv_id;
+            }
+            shmdt(shm_clientInfo_tmp);
+
+            cmds_info.dopipe = true;
+            cmds_info.isordpipe = false;
+            if(_cur >= _size){
+                cmds_info.endofcmds = true;
+                make_pipe(cmds_info);
+            }
+        }
+        else if(cmds[_cur][0] == '<' && cmds[_cur].size() > 1){
+            client_information* shm_clientInfo_tmp;
+            if((shm_clientInfo_tmp = (client_information*)shmat(shm_clientInfo_global, NULL, 0)) == (client_information*)-1){
+                cerr<<"match client_information's share memory start fail ! (<?)"<<endl;
+                return;
+            }
+            int user_pipe_send_id;
+            user_pipe_send_id = get_pipe_num(cmds[_cur]);
+            _cur++;
+            /* check send client exist or not */
+            string recvuserpipemsg;
+            if(shm_clientInfo_tmp[user_pipe_send_id-1].client_exist == false){
+                recvuserpipemsg = ("*** Error: user #" + to_string(user_pipe_send_id) + " does not exist yet. ***");
+                client_user_pipe_recv_message_fail = recvuserpipemsg;
+                cmds_info.fdin = devnull_fd;
+            }
+            /* check pipe is already exist or not */
+            else if(shm_clientInfo_tmp[user_pipe_send_id-1].client_fifo[client_id_global-1].file_exist == false){
+                recvuserpipemsg = ("*** Error: the pipe #" + to_string(user_pipe_send_id) + "->#" + to_string(client_id_global) + " does not exist yet. ***");
+                client_user_pipe_recv_message_fail = recvuserpipemsg;
+                cmds_info.fdin = devnull_fd;
+            }
+            else{
+                /* connect to user pipe */
+                cmds_info.fdin = make_user_pipe_in(user_pipe_send_id);
+                /* broadcast cmds message to receiver client */
+                string _client_command = "";
+                for(int i=0; i<client_command.size();i++){
+                    if(client_command[i] == '\n' || client_command[i] == '\r'){
+                        continue;
+                    }
+                    _client_command += client_command[i];
+                }
+                client_user_pipe_recv_message_success = _client_command;
+                send_user_pipe_id = user_pipe_send_id;
+                /* record user pipe which has been used */
+                //waited_close_user_pipe.push_back(user_pipe_send_id);
+            }
+            shmdt(shm_clientInfo_tmp);
+
+            cmds_info.dopipe = true;
+            cmds_info.isordpipe = false;
+            if(_cur >= _size){
+                cmds_info.endofcmds = true;
+                make_pipe(cmds_info);
+            }
+        }
         else{
             cmds_info.cmds.push_back(cmds[_cur++]);
             /* check the last cmds, need to make pipe */
@@ -584,6 +831,27 @@ void part_cmds(vector<string> cmds){
 }
 
 void make_pipe(cmds_allinfo &ccmds_info){
+
+    /* process the user pipe's message */
+    if(client_user_pipe_recv_message_success.size() != 0){
+        broadcast(client_id_global, "recv_user_pipe", client_user_pipe_recv_message_success, send_user_pipe_id);
+        usleep(100);
+        client_user_pipe_recv_message_success = "";
+    }
+    if(client_user_pipe_recv_message_fail.size() != 0){
+        cout<<client_user_pipe_recv_message_fail<<endl;
+        client_user_pipe_recv_message_fail = "";
+    }
+    if(client_user_pipe_send_message_success.size() != 0){
+        broadcast(client_id_global, "send_user_pipe", client_user_pipe_send_message_success, recv_user_pipe_id);
+        usleep(100);
+        client_user_pipe_send_message_success = "";
+    }
+    if(client_user_pipe_send_message_fail.size() != 0){
+        cout<<client_user_pipe_send_message_fail<<endl;
+        client_user_pipe_send_message_fail = "";
+    }
+
     ccmds_info.fdin = make_pipe_in(ccmds_info.fdin);
     exec_cmds(ccmds_info);
     /* decrease , increase and close pipe number after exec each time (different between ordinary and number pipe) */
@@ -592,6 +860,34 @@ void make_pipe(cmds_allinfo &ccmds_info){
     //     close_decrease_pipe();
     // }
     /* reset the struct of part cmds */
+    client_information* shm_clientInfo_tmp;
+    if((shm_clientInfo_tmp = (client_information*)shmat(shm_clientInfo_global, NULL, 0)) == (client_information*)-1){
+        cerr<<"match the client_information's share memory fail !"<<endl;
+        exit(1);
+    }
+
+    /* 
+        bug: no close the open file with user pipe, it will cause 
+        write empty to the file again and let the client who want
+        to read but read nothing.
+        [ bug fixxed ] 
+    */
+    /* close the user pipe fifo which write to the file */
+    if(recv_user_pipe_id != -1){
+        close(ccmds_info.fdout);
+    }
+
+    /* client receive the message sent by sender, it need to initialize the fifo */
+    if(send_user_pipe_id != -1 && shm_clientInfo_tmp[send_user_pipe_id-1].client_fifo[client_id_global-1].file_used == true){
+        shm_clientInfo_tmp[send_user_pipe_id-1].client_fifo[client_id_global-1].file_used = false; 
+        shm_clientInfo_tmp[send_user_pipe_id-1].client_fifo[client_id_global-1].file_exist = false;
+        shm_clientInfo_tmp[send_user_pipe_id-1].client_fifo[client_id_global-1].file_in = -1;
+        shm_clientInfo_tmp[send_user_pipe_id-1].client_fifo[client_id_global-1].file_out = -1;
+        unlink(shm_clientInfo_tmp[send_user_pipe_id-1].client_fifo[client_id_global-1].file_name);
+        memset(shm_clientInfo_tmp[send_user_pipe_id-1].client_fifo[client_id_global-1].file_name, '\0', MAX_FILE_LENGTH);
+    }
+    shmdt(shm_clientInfo_tmp);
+
     ccmds_info.cmds.clear();
     ccmds_info.fdin = STDIN_FILENO;
     ccmds_info.fdout = STDOUT_FILENO;
@@ -599,6 +895,9 @@ void make_pipe(cmds_allinfo &ccmds_info){
     ccmds_info.dopipe = false;
     ccmds_info.endofcmds = false;
     ccmds_info.isordpipe = false;
+
+    send_user_pipe_id = -1;
+    recv_user_pipe_id = -1;
 }
 
 void exec_cmds(cmds_allinfo ccmds_info){
@@ -627,22 +926,18 @@ void exec_cmds(cmds_allinfo ccmds_info){
             _name(ccmds_info.cmds);
             return;
         }
-        // if(ccmds_info.cmds[0] == "who"){
-        //     _who();
-        //     return;
-        // }
-        // else if(ccmds_info.cmds[0] == "tell"){
-        //     _tell(ccmds_info.cmds);
-        //     return;
-        // }
-        // else if(ccmds_info.cmds[0] == "yell"){
-        //     _yell(ccmds_info.cmds);
-        //     return;
-        // }
-        // else{
-        //     _name(ccmds_info.cmds);
-        //     return;
-        // }
+        else if(ccmds_info.cmds[0] == "tell"){
+            _tell(ccmds_info.cmds);
+            return;
+        }
+        else if(ccmds_info.cmds[0] == "yell"){
+            _yell(ccmds_info.cmds);
+            return;
+        }
+        else{
+            _who();
+            return;
+        }
     }
 
     char* args[ccmds_info.cmds.size()+1];
@@ -766,6 +1061,56 @@ int make_pipe_out(int pipenum){
         return fd[1];
     }
     return _pipe[pipenum][1];
+}
+
+int make_user_pipe_out(int _id){
+
+    /* file name structure -> user_pipe/up_source-id_target_id */
+    string file_name = "user_pipe/up_" + to_string(client_id_global) + "_" + to_string(_id);
+
+    client_information* shm_clientInfo_tmp;
+    if((shm_clientInfo_tmp = (client_information*)shmat(shm_clientInfo_global, NULL, 0)) == (client_information*)-1){
+        cerr<<"match the client_information's share memory fail !"<<endl;
+        exit(1);
+    }
+    /* make fifo */
+    if(mkfifo(file_name.c_str(), S_IFIFO | 0666) == -1){
+        perror("mkfifo errer !");
+        exit(1);
+    }
+    shm_clientInfo_tmp[_id-1].client_recv[client_id_global-1] = true;
+    kill(shm_clientInfo_tmp[_id-1].client_pid, SIGUSR2);
+    shm_clientInfo_tmp[client_id_global-1].client_fifo[_id-1].file_exist = true;
+    shm_clientInfo_tmp[client_id_global-1].client_fifo[_id-1].file_used = false;
+    memset(shm_clientInfo_tmp[client_id_global-1].client_fifo[_id-1].file_name, '\0', MAX_FILE_LENGTH);
+    strncpy(shm_clientInfo_tmp[client_id_global-1].client_fifo[_id-1].file_name, file_name.c_str(), MAX_FILE_LENGTH);
+    int user_pipe_fdout = open(file_name.c_str(), O_WRONLY);
+    shm_clientInfo_tmp[client_id_global-1].client_fifo[_id-1].file_out = user_pipe_fdout;
+    shmdt(shm_clientInfo_tmp);
+    return user_pipe_fdout;
+}
+
+int make_user_pipe_in(int _id){
+    client_information* shm_clientInfo_tmp;
+    if((shm_clientInfo_tmp = (client_information*)shmat(shm_clientInfo_global, NULL, 0)) == (client_information*)-1){
+        cerr<<"match the client_information's share memory fail !"<<endl;
+        exit(1);
+    }
+    if(shm_clientInfo_tmp[_id-1].client_fifo[client_id_global-1].file_exist == true){
+        int user_pipe_fdin = shm_clientInfo_tmp[_id-1].client_fifo[client_id_global-1].file_in;
+        shm_clientInfo_tmp[_id-1].client_fifo[client_id_global-1].file_used = true;
+        shmdt(shm_clientInfo_tmp);
+        return user_pipe_fdin;
+    }
+    // if(shm_clientInfo_tmp[_id-1].client_fifo[client_id_global-1].file_exist == true){
+    //     shm_clientInfo_tmp[_id-1].client_fifo[client_id_global-1].file_used = true;
+    //     shm_clientInfo_tmp[_id-1].client_fifo[client_id_global-1].file_out = -1;
+    //     int user_pipe_fdin = open(shm_clientInfo_tmp[_id-1].client_fifo[client_id_global-1].file_name, O_RDONLY);
+    //     shmdt(shm_clientInfo_tmp);
+    //     return user_pipe_fdin;
+    // }
+    shmdt(shm_clientInfo_tmp);
+    return -1;
 }
 
 int get_pipe_num(string cmd){
