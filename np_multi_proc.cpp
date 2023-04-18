@@ -71,7 +71,7 @@ struct client_information{
     char client_name[MAX_CLIENT_NAME];
     char client_ip[INET_ADDRSTRLEN];
     Fifo client_fifo[MAX_CLIENT_USER];
-    bool client_recv[MAX_CLIENT_USER];
+    bool client_recv[MAX_CLIENT_USER]; // record which client make fifo for current process's client
     client_information(){
         client_id = -1;
         client_pid = -1;
@@ -105,6 +105,7 @@ string client_user_pipe_send_message_fail;
 int recv_user_pipe_id;
 string client_user_pipe_recv_message_success;
 string client_user_pipe_recv_message_fail;
+
 /* user pipe error detection */
 int devnull_fd;
 
@@ -114,8 +115,6 @@ int devnull_fd;
 int get_pipe_num(string);
 int make_pipe_in(int); // get pipe read's file descriptor
 int make_pipe_out(int); // get pipe write's file descriptor
-int make_user_pipe_in(int); // get user read's file descriptor
-int make_user_pipe_out(int); //get user pipe write's descriptor
 void close_decrease_pipe(bool); // close 0 and decrease others after number pipe and increase after ordinary pipe
 void part_cmds(vector<string>);
 void make_pipe(cmds_allinfo&);
@@ -137,6 +136,9 @@ void server_signal_handler(int);
 void broadcast(int, string, string, int);
 
 ////////////////////     user pipe function     ////////////////////
+
+int make_user_pipe_in(int); // get user read's file descriptor
+int make_user_pipe_out(int); //get user pipe write's descriptor
 
 ////////////////////     built-in function     ////////////////////
 void _setenv(string,string);
@@ -282,7 +284,19 @@ void eraselogoutfifo(int __client_id){
     memset(shm_clientInfo_tmp[__client_id-1].client_name, '\0', MAX_CLIENT_NAME);
     memset(shm_clientInfo_tmp[__client_id-1].client_ip, '\0', INET_ADDRSTRLEN);
     for(int i=0; i<MAX_CLIENT_USER; i++){
-        shm_clientInfo_tmp[__client_id].client_fifo[i].file_exist = false;
+        if(shm_clientInfo_tmp[__client_id-1].client_fifo[i].file_exist == true){
+            /* need to read all file out */
+            char _buf[MAX_CLIENT_MESSAGE];
+            while(recv(shm_clientInfo_tmp[__client_id-1].client_fifo[i].file_in, &_buf, sizeof(_buf), 0) > 0){
+                /* this is the most important part to clear data in share memory. */
+            }
+            shm_clientInfo_tmp[__client_id-1].client_fifo[i].file_exist = false;
+            shm_clientInfo_tmp[__client_id-1].client_fifo[i].file_in = -1;
+            shm_clientInfo_tmp[__client_id-1].client_fifo[i].file_out = -1;
+            remove(shm_clientInfo_tmp[__client_id-1].client_fifo[i].file_name);
+            memset(shm_clientInfo_tmp[__client_id-1].client_fifo[i].file_name, '\0', MAX_FILE_LENGTH);
+        }
+        //shm_clientInfo_tmp[__client_id-1].client_fifo[i].file_exist = false;
     }
     for(int i=0; i<MAX_CLIENT_USER; i++){
         if(shm_clientInfo_tmp[i].client_fifo[__client_id-1].file_exist == true){
@@ -294,7 +308,7 @@ void eraselogoutfifo(int __client_id){
             shm_clientInfo_tmp[i].client_fifo[__client_id-1].file_exist = false;
             shm_clientInfo_tmp[i].client_fifo[__client_id-1].file_in = -1;
             shm_clientInfo_tmp[i].client_fifo[__client_id-1].file_out = -1;
-            unlink(shm_clientInfo_tmp[i].client_fifo[__client_id-1].file_name);
+            remove(shm_clientInfo_tmp[i].client_fifo[__client_id-1].file_name);
             memset(shm_clientInfo_tmp[i].client_fifo[__client_id-1].file_name, '\0', MAX_FILE_LENGTH);
         }
     }
@@ -316,6 +330,11 @@ void setClientInfo(int __client_id, struct sockaddr_in __cin){
     strncpy(shm_clientInfo_tmp[__client_id-1].client_ip, inet_ntoa(__cin.sin_addr), INET_ADDRSTRLEN);
     string name = "(no name)";
     strncpy(shm_clientInfo_tmp[__client_id-1].client_name, name.c_str(), MAX_CLIENT_NAME);
+    for(int i=0; i<MAX_CLIENT_USER; i++){
+        shm_clientInfo_tmp[__client_id-1].client_fifo[i].file_exist = false;
+        shm_clientInfo_tmp[__client_id-1].client_fifo[i].file_used = false;
+        shm_clientInfo_tmp[__client_id-1].client_recv[i] = false;
+    }
     // cout<<shm_clientInfo_tmp[__client_id-1].client_name<<" "<<strlen(shm_clientInfo_tmp[__client_id-1].client_name)<<endl;
     // cout<<shm_clientInfo_tmp[__client_id-1].client_id<<endl;
     // cout<<shm_clientInfo_tmp[__client_id-1].client_pid<<endl;
@@ -358,6 +377,7 @@ void setShareMM(){
         for(int j=0; j<MAX_CLIENT_USER; j++){
             shm_clientInfo_tmp[i].client_fifo[j].file_exist = false;
             shm_clientInfo_tmp[i].client_fifo[j].file_used = false;
+            shm_clientInfo_tmp[i].client_recv[j] = false;
         }
     }
     shmdt(shm_clientInfo_tmp);
@@ -443,7 +463,7 @@ void server_signal_handler(int sig){
         };
     }
     else if(sig == SIGINT){
-        /* server exit, unlink the share memory */
+        /* server exit, remove the share memory */
         shmctl(shm_clientInfo_global, IPC_RMID, NULL);
         shmctl(shm_clientMsg_global, IPC_RMID, NULL);
         cout<<endl;
@@ -866,6 +886,7 @@ void make_pipe(cmds_allinfo &ccmds_info){
         broadcast(client_id_global, "user_pipe", broadcast_msg, -1);
     }
     shmdt(shm_clientInfo_tmpp);
+    
     if(client_user_pipe_send_message_fail.size() != 0){
         cout<<client_user_pipe_send_message_fail<<endl;
         client_user_pipe_send_message_fail = "";
@@ -1099,11 +1120,12 @@ int make_user_pipe_out(int _id){
         exit(1);
     }
     shm_clientInfo_tmp[_id-1].client_recv[client_id_global-1] = true;
-    kill(shm_clientInfo_tmp[_id-1].client_pid, SIGUSR2);
+    // kill(shm_clientInfo_tmp[_id-1].client_pid, SIGUSR2);
     shm_clientInfo_tmp[client_id_global-1].client_fifo[_id-1].file_exist = true;
     shm_clientInfo_tmp[client_id_global-1].client_fifo[_id-1].file_used = false;
     memset(shm_clientInfo_tmp[client_id_global-1].client_fifo[_id-1].file_name, '\0', MAX_FILE_LENGTH);
     strncpy(shm_clientInfo_tmp[client_id_global-1].client_fifo[_id-1].file_name, file_name.c_str(), MAX_FILE_LENGTH);
+    kill(shm_clientInfo_tmp[_id-1].client_pid, SIGUSR2);
     int user_pipe_fdout = open(file_name.c_str(), O_WRONLY);
     shm_clientInfo_tmp[client_id_global-1].client_fifo[_id-1].file_out = user_pipe_fdout;
     shmdt(shm_clientInfo_tmp);

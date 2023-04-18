@@ -108,6 +108,8 @@ vector<int> waited_close_user_pipe;
 /* user pipe error detection */
 int devnull_fd;
 
+unordered_map<string, vector<int>> _group;
+
 ////////////////////     shell function     ////////////////////
 
 /* pipe's function */
@@ -151,6 +153,7 @@ void _who(void);
 void _tell(vector<string>);
 void _yell(vector<string>);
 void _name(vector<string>);
+void _tell_group(vector<string>);
 
 ////////////////////     main function     ////////////////////
 
@@ -339,6 +342,12 @@ void eraselogoutfd(int _id){
         }
     }
     /* delete target in client_info_table */
+    for(auto &it:_group){
+        auto it2 = find(it.second.begin(), it.second.end(), _id);
+        if(it2 != it.second.end()){
+            it.second.erase(it2);
+        }
+    }
     client_info_table.erase(_id);
     return;
 }
@@ -448,6 +457,7 @@ int shellMain(int _id, string _input_cmd){
     dup2(current_client->client_fd, STDOUT_FILENO);
     dup2(current_client->client_fd, STDERR_FILENO);
     //cout<<_input_cmd<<endl;
+    
     /* transform environment to current client's environment */
     clearenv();
     for(auto _env:current_client->client_env){
@@ -740,6 +750,28 @@ int make_pipe(cmds_allinfo &ccmds_info){
 int exec_cmds(cmds_allinfo ccmds_info){
 
     /* check built-in commands - setenv, printenv & exit */
+    if(ccmds_info.cmds[0] == "group"){
+        int n = ccmds_info.cmds.size();
+        for(int i=2;i<n;i++){
+            if(_group.find(ccmds_info.cmds[1]) == _group.end()){
+                _group[ccmds_info.cmds[1]] = {};
+                _group[ccmds_info.cmds[1]].push_back(stoi(ccmds_info.cmds[i]));
+            }
+            else{
+                _group[ccmds_info.cmds[1]].push_back(stoi(ccmds_info.cmds[i]));
+            }
+        }
+        return 0; 
+    }
+    if(ccmds_info.cmds[0] == "grouptell"){
+        if(find(_group[ccmds_info.cmds[1]].begin(), _group[ccmds_info.cmds[1]].end(), current_client->client_id) == _group[ccmds_info.cmds[1]].end()){
+            cout<<"Error: You are not in the group !!!"<<endl;
+            return 0;
+        }
+        _tell_group(ccmds_info.cmds);
+        return 0;
+    }
+
     if(ccmds_info.cmds[0] == "exit" || ccmds_info.cmds[0] == "EOF"|| ccmds_info.cmds[0] == "setenv" || ccmds_info.cmds[0] == "printenv"){
         if(ccmds_info.cmds[0] == "exit" || ccmds_info.cmds[0] == "EOF"){
             return -1;
@@ -929,6 +961,35 @@ void _who(){
                 who_msg += "\t<-me";
             }
             cout<<who_msg<<endl;
+        }
+    }
+    return;
+}
+
+void _tell_group(vector<string> _cmds){
+    for(auto it:_group[_cmds[1]]){
+        int recv_id = it;
+        string tell_msg = "";
+        for(int i=2; i<_cmds.size(); i++){
+            tell_msg += _cmds[i];
+            if(i != _cmds.size()-1){
+                tell_msg += " ";
+            }
+            else{
+                tell_msg += "\n";
+            }
+        }
+        /* receiver exist */
+        if(client_id_table[recv_id-1] == 1){
+            int recv_fd = client_info_table[recv_id].client_fd;
+            string _tell_msg = ("*** " + _cmds[1] + " group told you ***: " + tell_msg); 
+            if(send(recv_fd, _tell_msg.c_str(), _tell_msg.size(), 0) < 0){
+                cerr<<"send _tell message fault !"<<endl;
+            }
+        }
+        else{
+            string _tell_msg = ("*** Error: user #" + _cmds[1] + " does not exist yet. ***");
+            cout<<_tell_msg<<endl;
         }
     }
     return;
